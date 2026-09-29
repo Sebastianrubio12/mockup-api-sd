@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Credenciales / secretos (NUNCA subir a Git)
+.env
+*.pem
+.aws/
+aws-credentials*
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

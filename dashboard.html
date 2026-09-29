@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>API Monitoring · Service Desk</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #131c2e;
+      --panel-2: #0f1729;
+      --border: #22304a;
+      --text: #e6edf7;
+      --muted: #8899b0;
+      --green: #2ecc71;
+      --yellow: #f5c518;
+      --orange: #ff9f43;
+      --red: #ff5b5b;
+      --blue: #4d9fff;
+      --accent: #6c5ce7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 80% -10%, rgba(108,92,231,.15), transparent),
+        var(--bg);
+      color: var(--text);
+      padding: 20px 26px 60px;
+      min-height: 100vh;
+    }
+    .topbar {
+      display: flex; justify-content: space-between; align-items: center;
+      flex-wrap: wrap; gap: 14px; margin-bottom: 22px;
+      border-bottom: 1px solid var(--border); padding-bottom: 16px;
+    }
+    .title-wrap { display: flex; align-items: center; gap: 12px; }
+    .logo {
+      width: 38px; height: 38px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--accent), var(--blue));
+      display: grid; place-items: center; font-weight: 800; font-size: 18px;
+    }
+    h1 { font-size: 19px; font-weight: 650; letter-spacing: .2px; }
+    .subtitle { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .controls { display: flex; align-items: center; gap: 10px; }
+    .pill-btn {
+      background: var(--panel); border: 1px solid var(--border); color: var(--text);
+      border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+      display: flex; align-items: center; gap: 8px; transition: .15s;
+    }
+    .pill-btn:hover { border-color: var(--blue); }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 1.6s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    .updated { font-size: 12px; color: var(--muted); }
+
+    .banner { padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 14px; }
+    .banner.error { background: rgba(255,91,91,.12); border: 1px solid var(--red); color: #ffb3b3; }
+
+    /* KPI ROW */
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 22px; }
+    .kpi {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px;
+    }
+    .kpi .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+    .kpi .value { font-size: 28px; font-weight: 750; margin-top: 8px; }
+    .kpi .foot { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .kpi.err .value { color: var(--red); }
+    .kpi.ok .value { color: var(--green); }
+    .kpi.warn .value { color: var(--yellow); }
+
+    .grid-2 { display: grid; grid-template-columns: 1.4fr 1fr; gap: 18px; margin-bottom: 18px; }
+    @media (max-width: 980px){ .grid-2 { grid-template-columns: 1fr; } }
+
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 14px; padding: 16px 18px;
+    }
+    .panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+    .panel h2 .tag { font-size: 10px; color: var(--muted); border: 1px solid var(--border); padding: 2px 8px; border-radius: 999px; margin-left: auto; }
+
+    /* CHART */
+    .chart-wrap { position: relative; }
+    svg { width: 100%; height: 220px; display: block; }
+    .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .legend .k { display: inline-flex; align-items: center; gap: 6px; }
+    .legend .swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+
+    /* ALARMS */
+    .alarm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .alarm {
+      display: flex; align-items: center; gap: 10px; padding: 12px;
+      border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); font-size: 13px;
+    }
+    .alarm .ico { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-size: 13px; }
+    .alarm.ok .ico { background: rgba(46,204,113,.18); color: var(--green); }
+    .alarm.alarm .ico { background: rgba(255,91,91,.18); color: var(--red); }
+    .alarm .name { font-weight: 500; }
+    .alarm .st { margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+    .alarm.ok .st { color: var(--green); }
+    .alarm.alarm .st { color: var(--red); }
+
+    /* ENDPOINT CARDS */
+    .endpoints { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 22px; }
+    .ep {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+      padding: 16px 18px; position: relative; overflow: hidden;
+    }
+    .ep::before { content:""; position:absolute; left:0; top:0; bottom:0; width:4px; }
+    .ep.healthy::before { background: var(--green); }
+    .ep.warning::before { background: var(--yellow); }
+    .ep.critical::before { background: var(--red); }
+    .ep-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+    .ep-name { font-size: 15px; font-weight: 600; }
+    .ep-path { font-size: 11px; color: var(--muted); margin-top: 3px; font-family: ui-monospace, monospace; word-break: break-all; }
+    .ep-group { font-size: 10px; padding: 3px 8px; border-radius: 999px; background: rgba(77,159,255,.14); color: var(--blue); white-space: nowrap; }
+
+    .rate-row { display: flex; align-items: baseline; gap: 8px; margin: 14px 0 10px; }
+    .rate-val { font-size: 26px; font-weight: 750; }
+    .rate-lbl { font-size: 12px; color: var(--muted); }
+    .ep.healthy .rate-val { color: var(--green); }
+    .ep.warning .rate-val { color: var(--yellow); }
+    .ep.critical .rate-val { color: var(--red); }
+
+    .bar { height: 6px; border-radius: 999px; background: #1c2740; overflow: hidden; margin-bottom: 12px; }
+    .bar > span { display: block; height: 100%; }
+
+    .codes { display: flex; gap: 8px; flex-wrap: wrap; }
+    .code {
+      font-size: 12px; padding: 4px 9px; border-radius: 7px; font-weight: 600;
+      background: var(--panel-2); border: 1px solid var(--border);
+    }
+    .code b { font-weight: 700; }
+    .code.c401 { color: var(--orange); }
+    .code.c400 { color: var(--yellow); }
+    .code.c500 { color: var(--red); }
+    .req-count { font-size: 12px; color: var(--muted); margin-top: 12px; }
+
+    /* EVENT LOG TABLE */
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .5px; }
+    td.msg { white-space: normal; max-width: 340px; color: #cdd8ea; }
+    .sc { padding: 2px 8px; border-radius: 6px; font-weight: 700; font-size: 11.5px; }
+    .sc-2 { background: rgba(46,204,113,.16); color: var(--green); }
+    .sc-4 { background: rgba(245,197,24,.16); color: var(--yellow); }
+    .sc-403, .sc-429 { background: rgba(255,159,67,.16); color: var(--orange); }
+    .sc-5 { background: rgba(255,91,91,.16); color: var(--red); }
+    .errc { font-weight: 700; color: var(--red); }
+    tbody tr:hover { background: rgba(77,159,255,.06); }
+    .section-title { font-size: 15px; font-weight: 600; margin: 6px 0 14px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="title-wrap">
+      <div class="logo">API</div>
+      <div>
+        <h1>API Monitoring · Service Desk</h1>
+        <div class="subtitle">Monitoreo por endpoint · Logística e integraciones · AWS</div>
+      </div>
+    </div>
+    <div class="controls">
+      <span class="live-dot"></span>
+      <span class="updated" id="lastUpdate">Cargando…</span>
+      <button class="pill-btn" onclick="loadData()">↻ Actualizar</button>
+    </div>
+  </div>
+
+  <div id="banner"></div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <div class="grid-2">
+    <div class="panel chart-wrap">
+      <h2>Tasa de error / éxito <span class="tag">últimos 180 min</span></h2>
+      <div id="chart"></div>
+      <div class="legend">
+        <span class="k"><span class="swatch" style="background:var(--red)"></span>Tasa de error %</span>
+        <span class="k"><span class="swatch" style="background:var(--green)"></span>Tasa de éxito %</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Alarmas RTR · SPOT · Quoting <span class="tag" id="alarmTag"></span></h2>
+      <div class="alarm-grid" id="alarms"></div>
+    </div>
+  </div>
+
+  <div class="section-title">Endpoints monitoreados</div>
+  <section class="endpoints" id="endpoints"></section>
+
+  <div class="panel">
+    <h2>Event Log <span class="tag">eventos recientes por endpoint</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Company</th>
+            <th>Customer</th>
+            <th>Event Summary</th>
+            <th>Status</th>
+            <th>Message</th>
+            <th>Errors</th>
+          </tr>
+        </thead>
+        <tbody id="eventLog"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "/integration/api/monitoring";
+    const REFRESH_MS = 10000;
+
+    function scClass(code) {
+      if (code === 403) return "sc-403";
+      if (code === 429) return "sc-429";
+      const f = Math.floor(code / 100);
+      if (f === 2) return "sc-2";
+      if (f === 4) return "sc-4";
+      if (f === 5) return "sc-5";
+      return "sc-4";
+    }
+
+    function fmtTime(iso) {
+      try { return new Date(iso).toLocaleString(); } catch { return iso; }
+    }
+
+    function renderKpis(d) {
+      const eps = d.endpoints || [];
+      const totalReq = eps.reduce((s, e) => s + e.total_requests, 0);
+      const totalErr = eps.reduce((s, e) => s + e.errors.total, 0);
+      const avgErr = eps.length ? (eps.reduce((s, e) => s + e.error_rate, 0) / eps.length) : 0;
+      const failing = eps.filter(e => e.status !== "healthy").length;
+      const alarmsFiring = (d.alarms || []).filter(a => a.state === "ALARM").length;
+
+      document.getElementById("kpis").innerHTML = `
+        <div class="kpi"><div class="label">Endpoints</div><div class="value">${eps.length}</div><div class="foot">monitoreados</div></div>
+        <div class="kpi"><div class="label">Requests totales</div><div class="value">${totalReq.toLocaleString()}</div><div class="foot">ventana actual</div></div>
+        <div class="kpi err"><div class="label">Errores totales</div><div class="value">${totalErr.toLocaleString()}</div><div class="foot">401 · 400 · 500</div></div>
+        <div class="kpi ${avgErr > 5 ? 'err' : (avgErr > 2 ? 'warn' : 'ok')}"><div class="label">Tasa error prom.</div><div class="value">${avgErr.toFixed(1)}%</div><div class="foot">${failing} con degradación</div></div>
+        <div class="kpi ${alarmsFiring ? 'err' : 'ok'}"><div class="label">Alarmas activas</div><div class="value">${alarmsFiring}</div><div class="foot">en estado ALARM</div></div>
+      `;
+    }
+
+    function renderChart(series) {
+      const W = 640, H = 220, padL = 34, padB = 26, padT = 12, padR = 10;
+      const iw = W - padL - padR, ih = H - padT - padB;
+      const n = series.length;
+      const x = i => padL + (iw * i / (n - 1));
+      const y = v => padT + ih - (ih * v / 100);
+
+      const line = (key, color) => {
+        const pts = series.map((s, i) => `${x(i)},${y(s[key])}`).join(" ");
+        const area = `${padL},${y(0)} ${pts} ${x(n-1)},${y(0)}`;
+        return `
+          <polygon points="${area}" fill="${color}" opacity="0.08" />
+          <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2.5" />
+          ${series.map((s,i)=>`<circle cx="${x(i)}" cy="${y(s[key])}" r="2.5" fill="${color}" />`).join("")}
+        `;
+      };
+
+      const gridLines = [0,25,50,75,100].map(v => `
+        <line x1="${padL}" y1="${y(v)}" x2="${W-padR}" y2="${y(v)}" stroke="#22304a" stroke-width="1" />
+        <text x="6" y="${y(v)+4}" fill="#8899b0" font-size="10">${v}</text>
+      `).join("");
+
+      const labels = series.map((s,i)=> (i % 2 === 0)
+        ? `<text x="${x(i)}" y="${H-8}" fill="#8899b0" font-size="9" text-anchor="middle">${s.time}</text>` : "").join("");
+
+      document.getElementById("chart").innerHTML = `
+        <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+          ${gridLines}
+          ${line("success_rate", "#2ecc71")}
+          ${line("error_rate", "#ff5b5b")}
+          ${labels}
+        </svg>`;
+    }
+
+    function renderAlarms(alarms) {
+      const firing = alarms.filter(a => a.state === "ALARM").length;
+      document.getElementById("alarmTag").textContent = firing ? `${firing} activa(s)` : "todo OK";
+      document.getElementById("alarms").innerHTML = alarms.map(a => {
+        const cls = a.state === "ALARM" ? "alarm" : "ok";
+        const ico = a.state === "ALARM" ? "!" : "✓";
+        return `<div class="alarm ${cls}">
+          <span class="ico">${ico}</span>
+          <span class="name">${a.name}</span>
+          <span class="st">${a.state}</span>
+        </div>`;
+      }).join("");
+    }
+
+    function renderEndpoints(eps) {
+      document.getElementById("endpoints").innerHTML = eps.map(e => {
+        const succColor = e.status === "healthy" ? "var(--green)" : (e.status === "warning" ? "var(--yellow)" : "var(--red)");
+        return `
+        <div class="ep ${e.status}">
+          <div class="ep-head">
+            <div>
+              <div class="ep-name">${e.name}</div>
+              <div class="ep-path">${e.path}</div>
+            </div>
+            <span class="ep-group">${e.group}</span>
+          </div>
+          <div class="rate-row">
+            <span class="rate-val">${e.error_rate}%</span>
+            <span class="rate-lbl">tasa de error · ${e.success_rate}% éxito</span>
+          </div>
+          <div class="bar"><span style="width:${e.success_rate}%; background:${succColor}"></span></div>
+          <div class="codes">
+            <span class="code c401">401 <b>${e.errors.http_401}</b></span>
+            <span class="code c400">400 <b>${e.errors.http_400}</b></span>
+            <span class="code c500">500 <b>${e.errors.http_500}</b></span>
+          </div>
+          <div class="req-count">${e.total_requests.toLocaleString()} requests · ${e.errors.total} errores</div>
+        </div>`;
+      }).join("");
+    }
+
+    function renderEventLog(events) {
+      document.getElementById("eventLog").innerHTML = events.map(ev => `
+        <tr>
+          <td>${fmtTime(ev.timestamp)}</td>
+          <td>${ev.company_name}</td>
+          <td>${ev.customer_name}</td>
+          <td>${ev.event_summary}</td>
+          <td><span class="sc ${scClass(ev.status_code)}">${ev.status_code}</span></td>
+          <td class="msg">${ev.message}</td>
+          <td class="errc">${ev.error_count}</td>
+        </tr>
+      `).join("");
+    }
+
+    function render(d) {
+      const banner = document.getElementById("banner");
+      if (!d.success) {
+        banner.innerHTML = `<div class="banner error">⚠ ${d.message || "Error al obtener datos"}</div>`;
+        return;
+      }
+      banner.innerHTML = "";
+      renderKpis(d);
+      renderChart(d.series || []);
+      renderAlarms(d.alarms || []);
+      renderEndpoints(d.endpoints || []);
+      renderEventLog(d.event_log || []);
+    }
+
+    async function loadData() {
+      try {
+        const res = await fetch(API_URL, { cache: "no-store" });
+        const data = await res.json();
+        render(data);
+        document.getElementById("lastUpdate").textContent =
+          "Actualizado " + new Date().toLocaleTimeString();
+      } catch (err) {
+        document.getElementById("banner").innerHTML =
+          `<div class="banner error">⚠ No se pudo conectar con la API: ${err.message}</div>`;
+      }
+    }
+
+    loadData();
+    setInterval(loadData, REFRESH_MS);
+  </script>
+</body>
+</html>
