@@ -405,29 +405,3 @@ Pasos concretos para llevar este módulo al proyecto principal:
 
 > Resultado: el dashboard queda como una página nativa más del Service Desk, sin
 > reescribir nada y con un único punto de cambio pendiente (los datos de AWS).
-
----
-
-## 12. Resumen para la reunión (versión corta)
-
-- ✅ **Parte aislada y súper adaptable:** todo lo que migra vive en `monitoring/`
-  (paquete autocontenido); `main.py` es solo demo y se descarta al integrar.
-- ✅ Dashboard convertido en **módulo enchufable**, listo para integrarse en la
-  app "Service Desk Management" copiando una carpeta + una línea.
-- ✅ Interfaz **sin sidebar** (la app anfitriona ya la aporta) y con la **paleta
-  de la app**; estilos aislados con prefijo `.pd-` para no chocar con el tema.
-- ✅ Salud representada con **hex-grid adaptativo estilo Dynatrace** (un hexágono
-  por servicio, coloreado por estado): se reacomoda solo según cuántos servicios
-  haya, sin huecos ni deformarse.
-- ✅ **Refresco optimizado para el costo de AWS:** 30 s + pausa por visibilidad
-  en el frontend, y **caché en memoria (TTL 25 s) con lock** en el backend, para
-  que AWS no se consulte en cada request aunque haya muchos servicios/usuarios.
-- ✅ Funciona con datos de prueba, así que el diseño se puede **revisar y aprobar
-  ya**, sin esperar a AWS.
-- ✅ Integración = **una línea**: `app.include_router(monitoring_router)`.
-- ⏳ **Pendiente:** conectar los datos reales de AWS, tocando **solo**
-  `_generate_monitoring_payload()` en `monitoring/service.py`.
-- 🔑 **Se necesita:** definir la fuente de datos, nombres reales y permisos de
-  solo lectura en AWS.
-- 💲 **Costo:** ya mitigado con caché + refresco espaciado; confirmar cifras con
-  AWS y acotar la ventana del Event Log al conectar.
