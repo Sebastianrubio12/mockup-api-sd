@@ -24,9 +24,27 @@ PASO 3 - Extraer los datos reales (endpoints, alarms, event_log, series) y mapea
 """
 
 import random
+import threading
+import time
 from datetime import datetime, timedelta
 
 # import boto3  # <- descomentar al conectar AWS
+
+
+# --------------------------------------------------------------------------
+# CACHE EN MEMORIA (clave para el COSTO al conectar AWS)
+# --------------------------------------------------------------------------
+# El frontend refresca en intervalos y puede haber varios usuarios/pestañas
+# abiertos a la vez. Sin caché, CADA request golpearía CloudWatch/Logs Insights
+# y eso se paga por consulta. Con la caché, AWS se consulta como mucho una vez
+# cada CACHE_TTL_SECONDS sin importar cuántos clientes pidan datos.
+#
+# CloudWatch agrega métricas por minuto, así que un TTL de ~25-30s da datos
+# "frescos" sin costo extra. Ajustable según lo que definan con backend.
+CACHE_TTL_SECONDS = 25
+
+_cache_lock = threading.Lock()
+_cache = {"payload": None, "expires_at": 0.0}
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +84,42 @@ def _mock_company(i):
 
 
 def build_monitoring_payload():
-    """Genera el snapshot de monitoreo por endpoint (simulado hasta conectar AWS)."""
+    """Punto de entrada CON CACHÉ que usa el router.
+
+    Devuelve el snapshot cacheado si sigue vigente; si expiró, lo regenera una
+    sola vez (protegido por lock para que ráfagas de requests concurrentes no
+    disparen varias consultas a AWS a la vez). NO cambiar la firma: el router y
+    el frontend dependen del mismo formato de retorno.
+
+    Al conectar AWS, lo pesado (las llamadas a CloudWatch/Logs) vive dentro de
+    _generate_monitoring_payload(); esta capa de caché las amortigua tal cual.
+    """
+    now_ts = time.time()
+
+    # Camino rápido: caché vigente, sin lock (lectura barata).
+    cached = _cache["payload"]
+    if cached is not None and now_ts < _cache["expires_at"]:
+        return cached
+
+    with _cache_lock:
+        # Re-chequeo dentro del lock: otro hilo pudo haber refrescado ya.
+        now_ts = time.time()
+        if _cache["payload"] is not None and now_ts < _cache["expires_at"]:
+            return _cache["payload"]
+
+        payload = _generate_monitoring_payload()
+        _cache["payload"] = payload
+        _cache["expires_at"] = now_ts + CACHE_TTL_SECONDS
+        return payload
+
+
+def _generate_monitoring_payload():
+    """Genera el snapshot de monitoreo por endpoint (simulado hasta conectar AWS).
+
+    AQUÍ es donde, al migrar, irán las consultas reales a AWS. Todo lo caro
+    (CloudWatch / Logs Insights / DynamoDB) va dentro de esta función; la caché
+    de build_monitoring_payload() se encarga de no llamarla en cada request.
+    """
     now = datetime.utcnow()
     endpoints = []
 

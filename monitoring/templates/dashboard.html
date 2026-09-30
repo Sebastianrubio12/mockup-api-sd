@@ -86,8 +86,10 @@
       border-radius: 14px; padding: 18px 24px; margin-bottom: 20px; box-shadow: var(--pd-shadow);
     }
     .pd-ring-wrap { display: flex; align-items: center; gap: 18px; }
-    /* Hex-grid estilo Dynatrace: un hexágono por servicio, coloreado por estado */
-    .pd-hexgrid { display: block; width: 116px; height: 96px; flex-shrink: 0; }
+    /* Hex-grid estilo Dynatrace: un hexágono por servicio, coloreado por estado.
+       Ancho fijo y alto automático: el SVG (viewBox adaptativo) conserva su
+       proporción sin deformarse, tenga pocos o varios servicios. */
+    .pd-hexgrid { display: block; width: 116px; height: auto; flex-shrink: 0; }
     .pd-hex { transition: opacity .2s; }
     .pd-hex.g { fill: var(--pd-green); }
     .pd-hex.y { fill: var(--pd-yellow); }
@@ -233,7 +235,7 @@
       </div>
       <div class="pd-actions">
         <div class="pd-live"><span class="pd-live-dot"></span><span id="pd-lastUpdate">Cargando…</span></div>
-        <button class="pd-btn" onclick="pdLoadData()">↻ Actualizar</button>
+        <button class="pd-btn" id="pd-refreshBtn" onclick="pdManualRefresh()">↻ Actualizar</button>
       </div>
     </header>
 
@@ -284,7 +286,17 @@
 
   <script>
     const PD_API_URL = "/integration/api/monitoring";
-    const PD_REFRESH_MS = 10000;
+    // Intervalo de auto-refresh. En producción las métricas de CloudWatch se
+    // agregan por minuto, así que pedir cada 10s no da datos nuevos y sí
+    // multiplica el costo de las consultas a AWS. 30s es un buen balance
+    // entre "se siente vivo" y "no dispara la factura".
+    const PD_REFRESH_MS = 30000;
+    const PD_FETCH_TIMEOUT_MS = 12000;  // corta llamadas colgadas
+    const PD_MAX_BACKOFF_MS = 300000;   // tope de espera tras errores (5 min)
+
+    let pdIsLoading = false;   // evita peticiones solapadas
+    let pdTimer = null;        // handle del próximo refresh programado
+    let pdFailStreak = 0;      // errores consecutivos (para backoff)
 
     function pdScClass(code) {
       if (code === 403) return "pd-sc-403";
@@ -301,13 +313,47 @@
     }
 
     // Hex-grid estilo Dynatrace: un hexágono por servicio, coloreado por su estado.
-    // Se acomodan en un panal centrado; si hay más servicios que celdas se amplía la última fila.
+    // La rejilla es ADAPTATIVA: se calcula el layout del panal según cuántos
+    // servicios haya, sin celdas vacías de relleno. Escala bien de pocos a
+    // varios servicios (no pensado para cientos).
     function pdHealthHexGrid(eps) {
       const clsFor = st => st === "critical" ? "r" : (st === "warning" ? "y" : "g");
-      // Panal de referencia: filas de 2-3-2-3 (hasta 10 visibles); el resto rellena en orden.
-      const rows = [2, 3, 2, 3];
+      const n = eps.length;
+      if (!n) {
+        // Sin servicios: no dibujamos panal (evita un SVG vacío o roto).
+        return `<svg class="pd-hexgrid" viewBox="0 0 116 96" preserveAspectRatio="xMidYMid meet"></svg>`;
+      }
+
+      // --- Layout adaptativo -------------------------------------------------
+      // Columnas base ~ raíz cuadrada del total (panal balanceado), con un tope
+      // para que no se aplaste en pantalla. Las filas alternan cols / cols-1
+      // para lograr el encaje de panal, y repartimos TODOS los servicios.
+      const MAX_COLS = 5;
+      // ceil(sqrt) da un panal más ancho y equilibrado (mejor para dashboards).
+      // Para muy pocos servicios (<=4) forzamos que quepan en 1-2 filas y no
+      // quede una columna alta y flaca.
+      let cols = Math.min(MAX_COLS, Math.max(2, Math.ceil(Math.sqrt(n))));
+      if (n === 3) cols = 3;   // una sola fila de 3
+      if (n === 4) cols = 2;   // panal 2 x 2
+
+      // Repartimos n servicios en filas. El efecto panal (alternar cols / cols-1)
+      // solo tiene sentido con 3+ columnas; con 2 columnas usamos filas parejas
+      // para no generar una columna alta y flaca (ej. n=4 -> 2x2, no 2-1-1).
+      const alternate = cols >= 3;
+      const rows = [];
+      let remaining = n;
+      let wide = true; // la primera fila es la "ancha"
+      while (remaining > 0) {
+        const cap = (alternate && !wide) ? Math.max(1, cols - 1) : cols;
+        const count = Math.min(cap, remaining);
+        rows.push(count);
+        remaining -= count;
+        wide = !wide;
+      }
+
+      // --- Geometría ---------------------------------------------------------
       const R = 15;                 // radio del hexágono
-      const w = Math.sqrt(3) * R;   // ancho horizontal de un hexágono (flat-top invertido = pointy-top)
+      const w = Math.sqrt(3) * R;   // ancho horizontal (pointy-top)
       const vGap = R * 1.5;         // separación vertical entre filas
       const hexPath = (cx, cy) => {
         const pts = [];
@@ -318,19 +364,20 @@
         return pts.join(" ");
       };
 
+      const maxRowCount = Math.max(...rows);
+      const maxRowW = maxRowCount * w + w / 2; // +medio hex por el desfase de filas
+
       const cells = [];
       let idx = 0;
-      const totalCells = rows.reduce((s, n) => s + n, 0);
-      const maxRowW = Math.max(...rows) * w + w / 2;
       rows.forEach((count, rowI) => {
         const rowW = count * w;
-        const startX = (maxRowW - rowW) / 2 + w / 2;
+        const startX = (maxRowW - rowW) / 2 + w / 2; // centra cada fila
         for (let i = 0; i < count; i++) {
           const cx = startX + i * w;
           const cy = R + rowI * vGap;
           const ep = eps[idx];
-          const cls = ep ? clsFor(ep.status) : "empty";
-          const label = ep ? `${ep.name} · ${ep.error_rate}% error` : "";
+          const cls = clsFor(ep.status);
+          const label = `${ep.name} · ${ep.error_rate}% error`;
           cells.push(`<polygon class="pd-hex ${cls}" points="${hexPath(cx, cy)}"><title>${label}</title></polygon>`);
           idx++;
         }
@@ -500,21 +547,78 @@
       pdRenderEventLog(d.event_log || []);
     }
 
+    // Programa el siguiente refresh. Con backoff exponencial si hay errores
+    // (así no seguimos pegando cada 30s contra un endpoint caído, que en AWS
+    // igual cuesta) y sin programar nada si la pestaña está oculta.
+    function pdScheduleNext() {
+      if (pdTimer) { clearTimeout(pdTimer); pdTimer = null; }
+      if (document.hidden) return;  // nadie mirando -> no consumimos AWS
+      let delay = PD_REFRESH_MS;
+      if (pdFailStreak > 0) {
+        delay = Math.min(PD_REFRESH_MS * Math.pow(2, pdFailStreak), PD_MAX_BACKOFF_MS);
+      }
+      pdTimer = setTimeout(pdLoadData, delay);
+    }
+
+    function pdSetLoadingUI(loading) {
+      const btn = document.getElementById("pd-refreshBtn");
+      if (!btn) return;
+      btn.disabled = loading;
+      btn.style.opacity = loading ? ".6" : "";
+      btn.style.cursor = loading ? "default" : "";
+      btn.textContent = loading ? "Actualizando…" : "↻ Actualizar";
+    }
+
     async function pdLoadData() {
+      // Guard: si ya hay una petición en curso, no lanzamos otra.
+      if (pdIsLoading) return;
+      pdIsLoading = true;
+      pdSetLoadingUI(true);
+
+      // Timeout: una llamada colgada no debe bloquear las siguientes ni dejar
+      // el botón trabado. AbortController corta el fetch pasado el límite.
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), PD_FETCH_TIMEOUT_MS);
+
       try {
-        const res = await fetch(PD_API_URL, { cache: "no-store" });
+        const res = await fetch(PD_API_URL, { cache: "no-store", signal: ctrl.signal });
         const data = await res.json();
         pdRender(data);
+        pdFailStreak = 0;  // éxito -> reseteamos backoff
         document.getElementById("pd-lastUpdate").textContent =
           "Actualizado " + new Date().toLocaleTimeString();
       } catch (err) {
+        pdFailStreak++;
+        const msg = err.name === "AbortError"
+          ? "La API tardó demasiado en responder (timeout)."
+          : `No se pudo conectar con la API: ${err.message}`;
         document.getElementById("pd-banner").innerHTML =
-          `<div class="pd-banner error">⚠ No se pudo conectar con la API: ${err.message}</div>`;
+          `<div class="pd-banner error">⚠ ${msg}</div>`;
+      } finally {
+        clearTimeout(to);
+        pdIsLoading = false;
+        pdSetLoadingUI(false);
+        pdScheduleNext();  // programa el próximo ciclo (con backoff si aplica)
       }
     }
 
+    // Botón "Actualizar": fuerza un refresh inmediato reprogramando el ciclo.
+    function pdManualRefresh() {
+      if (pdIsLoading) return;
+      pdFailStreak = 0;
+      pdLoadData();
+    }
+
+    // Pausa/reanuda según visibilidad de la pestaña. Al volver, refresca ya.
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        if (pdTimer) { clearTimeout(pdTimer); pdTimer = null; }
+      } else {
+        pdLoadData();
+      }
+    });
+
     pdLoadData();
-    setInterval(pdLoadData, PD_REFRESH_MS);
   </script>
 </body>
 </html>

@@ -44,8 +44,10 @@ copiar la carpeta `monitoring/` y añadir una línea:
    para caer directo en el área de contenido del Service Desk.
 5. **Rutas agrupadas en un `APIRouter`.** Se integran con una sola llamada
    `include_router`, sin tocar el `main` del Service Desk salvo esa línea.
-6. **Sin estado global ni dependencias ocultas.** El módulo no guarda estado en
-   memoria compartida; cada request arma su payload. Fácil de mover o testear.
+6. **Único estado compartido: una caché en memoria acotada.** La única memoria
+   compartida es la caché con TTL de `service.py` (ver sección 6), pensada para
+   no golpear AWS en cada request. Es autocontenida, sin dependencias externas
+   (ni Redis ni similar) y fácil de mover o testear.
 
 ---
 
@@ -75,6 +77,74 @@ Responsabilidad de cada pieza:
 
 ---
 
+## 2.1. Cómo funciona cada módulo por dentro
+
+Explicación pieza por pieza de qué hace cada archivo y cómo se conectan entre sí.
+El flujo de una petición es: **navegador → `router.py` → `service.py` → JSON →
+`dashboard.html` repinta**.
+
+### `monitoring/__init__.py` — la puerta del paquete
+
+Es lo que convierte la carpeta `monitoring/` en un paquete importable y **expone
+una sola cosa hacia afuera**: `monitoring_router`. Gracias a esto, la app
+anfitriona solo necesita `from monitoring import monitoring_router` sin conocer la
+estructura interna. Todo lo demás (service, template) queda encapsulado.
+
+### `monitoring/router.py` — las rutas (capa web)
+
+Define un `APIRouter` con **dos endpoints** y nada de lógica de datos:
+
+- `GET /production-dashboard` → devuelve el archivo `dashboard.html` (la vista que
+  se enlaza al item de la sidebar del Service Desk).
+- `GET /integration/api/monitoring` → llama a `build_monitoring_payload()` y
+  devuelve el JSON. Si esa llamada falla, en vez de romper responde un JSON con
+  `success: false` y listas vacías, y el frontend muestra un banner rojo.
+
+Es una capa fina a propósito: **no sabe de dónde salen los datos**, solo los pide
+y los entrega. Por eso no se toca al conectar AWS.
+
+### `monitoring/service.py` — los datos (capa de negocio)
+
+El corazón del módulo y **el único archivo que backend toca al conectar AWS**.
+Tiene tres partes:
+
+1. **`build_monitoring_payload()` — capa de caché.** Es la que llama el router.
+   Si hay un snapshot en caché vigente (TTL 25 s) lo devuelve al instante; si
+   expiró, regenera **una sola vez** (protegido con lock para que varias
+   peticiones simultáneas no disparen varias consultas a AWS). Esta capa es la
+   que controla el costo. **No se toca al migrar.**
+2. **`_generate_monitoring_payload()` — armado del snapshot.** Hoy genera datos
+   simulados (endpoints, event log, alarmas, series). **Aquí** es donde irán las
+   consultas reales a CloudWatch / Logs Insights / DynamoDB al migrar, respetando
+   el mismo formato de retorno.
+3. **Catálogo y helpers** (`MONITORED_ENDPOINTS`, `ERROR_SAMPLES`, `_mock_company`):
+   definen qué servicios se muestran y generan datos de relleno realistas
+   mientras no hay AWS.
+
+### `monitoring/templates/dashboard.html` — la vista (capa de presentación)
+
+Todo el frontend en un solo archivo (HTML + CSS + JS), pensado para **embeberse**
+dentro del Service Desk:
+
+- **HTML/CSS:** el contenido de la página, sin sidebar (la app anfitriona la
+  aporta). Todos los estilos van prefijados con `.pd-` para no chocar con el tema
+  del Service Desk.
+- **JS de render:** funciones `pdRender*` que reciben el JSON y pintan cada bloque
+  (health strip con el **hex-grid adaptativo**, KPIs, gráfica, alarmas, lista de
+  servicios y tabla de event log). Todo se ajusta solo a la cantidad de datos.
+- **JS de refresco:** `pdLoadData()` pide el JSON cada 30 s con anti-solapamiento,
+  timeout, backoff ante errores y pausa cuando la pestaña no está visible
+  (ver sección 6).
+
+### `main.py` — arranque SOLO para la demo local
+
+Levanta una mini-app FastAPI, activa CORS, monta el `monitoring_router` y hace que
+la raíz `/` redirija al dashboard. Sirve para **ver y aprobar el módulo aislado**.
+**No forma parte del módulo** y se descarta al integrar al Service Desk (allá el
+router se monta en la app existente).
+
+---
+
 ## 3. Cómo se integra en la app real
 
 En la app "Service Desk Management" **no se usa `main.py`**. Basta con incluir el
@@ -101,18 +171,45 @@ Notas de integración del frontend:
 
 ---
 
-## 4. Qué muestra el dashboard
+## 4. Qué muestra el dashboard (y la idea de cada sección)
 
-- **Health strip:** un anillo de salud global (verde/amarillo/rojo según % de
-  éxito) más el conteo de servicios Healthy / Degradados / Críticos.
-- **Fila de KPIs:** número de servicios, requests totales, errores totales, tasa
-  de error promedio y alarmas activas.
-- **Gráfica** de tasa de error vs tasa de éxito en el tiempo.
-- **Panel de alarmas** (RTR, SPOT, Quoting) con estado `OK` o `ALARM`.
-- **Lista de servicios monitoreados** (una fila por endpoint) con estado de
-  salud, tasa de error, barra de éxito y desglose de códigos HTTP (401/400/500).
-- **Tabla de Event Log** con los eventos recientes (company, customer, tipo de
-  evento, código de estado, mensaje, número de errores).
+El dashboard está ordenado de **arriba hacia abajo por nivel de detalle**: primero
+el pantallazo general (¿está todo bien?) y luego se va bajando al detalle (¿qué
+servicio, qué error, qué evento?). La idea es que en 3 segundos sepas si hay
+problema, y si lo hay, puedas bajar a ver dónde.
+
+- **Health strip (arriba del todo) — "¿está todo bien de un vistazo?"**
+  Un **hex-grid adaptativo estilo Dynatrace**: un hexágono por servicio, coloreado
+  verde/amarillo/rojo según su estado, más el % de salud global y el conteo de
+  Healthy / Degradados / Críticos. **Idea:** dar el semáforo general del entorno
+  sin leer números. Si todo está verde, no hay que mirar más abajo. El panal se
+  arma solo según cuántos servicios haya (sin huecos) y no se deforma.
+
+- **Fila de KPIs — "los números clave en grande."**
+  Servicios monitoreados, requests totales, errores totales, tasa de error
+  promedio y alarmas activas. **Idea:** las 5 métricas que resumen el estado en
+  cifras, para acompañar el semáforo de arriba con magnitudes concretas.
+
+- **Gráfica de error vs éxito — "¿esto viene mejorando o empeorando?"**
+  La tasa de error y la de éxito a lo largo del tiempo (últimos ~180 min).
+  **Idea:** dar contexto de tendencia. Un 5% de error no es lo mismo si venía
+  subiendo que si ya está bajando; la gráfica muestra esa dirección.
+
+- **Panel de alarmas (RTR, SPOT, Quoting) — "¿saltó algo que ya vigilábamos?"**
+  Lista de alarmas con estado `OK` o `ALARM`. **Idea:** reflejar las alarmas que
+  el equipo ya definió como importantes (las mismas de CloudWatch), para no tener
+  que interpretar métricas crudas: si algo crítico se rompe, aquí se pone en rojo.
+
+- **Lista de servicios monitoreados — "¿cuál servicio es el que falla?"**
+  Una fila por endpoint con su estado, tasa de error, barra de éxito y desglose de
+  códigos HTTP (401/400/500). **Idea:** el nivel de detalle por servicio. Cuando
+  el health strip marca rojo, aquí identificas exactamente qué endpoint y con qué
+  tipo de error (auth, cliente o servidor).
+
+- **Tabla de Event Log (abajo) — "¿qué pasó exactamente y a quién?"**
+  Eventos recientes con company, customer, tipo de evento, código de estado,
+  mensaje y número de errores. **Idea:** el máximo detalle, evento por evento,
+  para investigar un caso puntual (qué cliente, qué mensaje devolvió la API).
 
 ---
 
@@ -129,29 +226,60 @@ conectar la fuente real.
 
 ---
 
-## 6. Cómo funciona el "Actualizar" y su alcance
+## 6. Cómo funciona el "Actualizar" (optimizado para el costo de AWS)
 
-- El dashboard se **actualiza solo cada 10 segundos**: vuelve a pedir los datos
-  al backend y repinta la pantalla. También hay un botón "Actualizar" manual.
-- **Alcance (importante):** el frontend **no limita** cuántos datos muestra.
-  Pinta *todo* lo que el backend le entregue. Hoy el mock manda una muestra
-  pequeña, pero cuando se conecte AWS y lleguen todas las companies, customers y
-  endpoints reales, el dashboard los mostrará **todos automáticamente**, sin
-  cambiar nada en la interfaz. Las tablas y KPIs se ajustan solos a la cantidad
-  de datos recibidos.
+El refresco está pensado en **dos capas** para que la página cargue rápido y se
+sienta viva, pero **sin disparar la factura de AWS** cuando haya muchos servicios
+o varios usuarios con el dashboard abierto.
 
-> **Aclaración honesta:** hoy NO es tiempo real. Es un refresco cada 10 segundos.
-> Cuando se conecte AWS será "casi en vivo": tan actualizado como cada 10 s, con
-> datos verdaderos. Ese intervalo se puede subir o bajar según se necesite.
+**Frontend (cuántas veces se pide):**
+
+- Auto-refresh cada **30 segundos** (antes 10 s). CloudWatch agrega métricas por
+  minuto, así que pedir cada 10 s no daba datos nuevos y sí multiplicaba el costo.
+- **Se pausa cuando la pestaña no está visible** y reanuda al volver: nadie
+  mirando = cero consultas a AWS.
+- **No solapa peticiones** (si una sigue en curso, no lanza otra) y el botón
+  "Actualizar" se deshabilita mostrando "Actualizando…".
+- **Timeout de 12 s** por petición: una llamada colgada no traba el ciclo.
+- **Backoff exponencial** si la API falla (hasta 5 min): no sigue pegando cada
+  30 s contra un endpoint caído (que en AWS igual costaría).
+
+**Backend (que cada petición NO golpee AWS) — lo que de verdad controla el costo:**
+
+- `service.py` guarda el último snapshot en una **caché en memoria con TTL de
+  25 s**. Aunque 1 o 50 pestañas refresquen, AWS se consulta **como máximo una
+  vez cada 25 s**. El costo deja de escalar con el número de usuarios.
+- La caché usa un **lock**: si llegan varias peticiones justo al expirar, solo
+  una regenera y las demás reusan ese resultado (evita ráfagas de consultas
+  simultáneas a CloudWatch).
+
+Los dos tiempos son ajustables: `PD_REFRESH_MS` en `dashboard.html` (frontend) y
+`CACHE_TTL_SECONDS` en `service.py` (backend).
+
+**Alcance (importante):** el frontend **no limita** cuántos datos muestra. Pinta
+*todo* lo que el backend le entregue. Hoy el mock manda una muestra pequeña, pero
+cuando se conecte AWS y lleguen todos los endpoints reales, el dashboard los
+mostrará **todos automáticamente**, sin cambiar nada en la interfaz. Tablas, KPIs
+y el hex-grid se ajustan solos a la cantidad de datos recibidos.
+
+> **Aclaración honesta:** no es tiempo real. Es un refresco cada 30 s con una
+> caché de 25 s detrás. Cuando se conecte AWS será "casi en vivo" con datos
+> verdaderos, y esos intervalos se pueden subir o bajar según se necesite.
 
 ---
 
 ## 7. Qué falta (el trabajo con backend)
 
 Solo hay que trabajar dentro de **`monitoring/service.py`**, en la función
-`build_monitoring_payload()`. Ahí quedó documentado, paso a paso, dónde y cómo se
-conectará AWS. El objetivo es reemplazar los datos de prueba por datos reales
+`_generate_monitoring_payload()` (es la que arma el snapshot; ahí van las
+consultas reales a AWS). Ahí quedó documentado, paso a paso, dónde y cómo se
+conectará. El objetivo es reemplazar los datos de prueba por datos reales
 respetando **exactamente el mismo formato** del diccionario que se retorna.
+
+> **No tocar `build_monitoring_payload()`:** esa es la capa de caché (sección 6)
+> que envuelve a `_generate_monitoring_payload()` y amortigua el costo de AWS.
+> El router y el frontend siguen llamando a `build_monitoring_payload()` sin
+> enterarse del cambio de fuente.
 
 Formato esperado por el dashboard (no cambiar las llaves):
 
@@ -211,14 +339,23 @@ fuente:
 - **DynamoDB**: se cobra por lectura consumida. Un `Scan` completo repetido cada
   pocos segundos es lo más caro; conviene evitarlo.
 
-### Recomendaciones para controlar el costo
+### Qué ya está implementado para controlar el costo
 
-- **Subir el intervalo de refresco** (ej. cada 30–60 s en vez de 10 s) reduce
-  mucho el número de consultas.
-- **Usar caché**: no re-consultar AWS en cada refresco, sino guardar el último
-  resultado unos segundos y que varios usuarios compartan esa lectura.
-- **Limitar el Event Log**: acotar la ventana de tiempo y la cantidad de
-  resultados por consulta.
+- ✅ **Intervalo de refresco espaciado** a 30 s (antes 10 s) y **pausa por
+  visibilidad** de la pestaña. Ver sección 6.
+- ✅ **Caché en memoria (TTL 25 s) con lock** en `service.py`: AWS se consulta
+  como mucho una vez por ventana, sin importar cuántos usuarios refresquen. Esta
+  es la pieza que más reduce el costo.
+- ✅ **Backoff, timeout y anti-solapamiento** en el frontend para no insistir
+  contra un endpoint lento o caído.
+
+### Pendiente al conectar AWS
+
+- **Limitar el Event Log** dentro de `_generate_monitoring_payload()`: acotar la
+  ventana de tiempo y la cantidad de resultados por consulta de Logs Insights
+  (es la fuente potencialmente más cara).
+- **Afinar los tiempos** (`PD_REFRESH_MS` y `CACHE_TTL_SECONDS`) según el balance
+  frescura/costo que defina el equipo.
 
 > ⚠️ **Verificar los precios exactos** con el equipo de AWS o en la calculadora
 > oficial de precios de AWS, porque varían por región y con el tiempo.
@@ -279,14 +416,18 @@ Pasos concretos para llevar este módulo al proyecto principal:
   app "Service Desk Management" copiando una carpeta + una línea.
 - ✅ Interfaz **sin sidebar** (la app anfitriona ya la aporta) y con la **paleta
   de la app**; estilos aislados con prefijo `.pd-` para no chocar con el tema.
-- ✅ Salud representada con **hex-grid estilo Dynatrace** (un hexágono por
-  servicio, coloreado por estado) en vez del anillo.
+- ✅ Salud representada con **hex-grid adaptativo estilo Dynatrace** (un hexágono
+  por servicio, coloreado por estado): se reacomoda solo según cuántos servicios
+  haya, sin huecos ni deformarse.
+- ✅ **Refresco optimizado para el costo de AWS:** 30 s + pausa por visibilidad
+  en el frontend, y **caché en memoria (TTL 25 s) con lock** en el backend, para
+  que AWS no se consulte en cada request aunque haya muchos servicios/usuarios.
 - ✅ Funciona con datos de prueba, así que el diseño se puede **revisar y aprobar
   ya**, sin esperar a AWS.
 - ✅ Integración = **una línea**: `app.include_router(monitoring_router)`.
 - ⏳ **Pendiente:** conectar los datos reales de AWS, tocando **solo**
-  `monitoring/service.py`.
+  `_generate_monitoring_payload()` en `monitoring/service.py`.
 - 🔑 **Se necesita:** definir la fuente de datos, nombres reales y permisos de
   solo lectura en AWS.
-- 💲 **Costo:** bajo pero existe; se controla con refresco más espaciado y caché.
-  Confirmar cifras con AWS.
+- 💲 **Costo:** ya mitigado con caché + refresco espaciado; confirmar cifras con
+  AWS y acotar la ventana del Event Log al conectar.
