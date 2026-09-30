@@ -79,6 +79,29 @@
     .pd-banner { padding: 12px 16px; border-radius: 10px; margin-bottom: 18px; font-size: 13.5px; }
     .pd-banner.error { background: var(--pd-red-soft); border: 1px solid var(--pd-red); color: #ffc2c2; }
 
+    /* ===== FILTER BAR ===== */
+    .pd-filterbar {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    .pd-filter-modes { display: inline-flex; background: var(--pd-surface-2); border: 1px solid var(--pd-border); border-radius: 9px; padding: 3px; gap: 3px; }
+    .pd-mode {
+      background: transparent; border: none; color: var(--pd-muted); font-size: 12.5px; font-weight: 600;
+      padding: 7px 14px; border-radius: 7px; cursor: pointer; transition: .15s;
+    }
+    .pd-mode:hover { color: var(--pd-text); }
+    .pd-mode.active { background: var(--pd-accent); color: #fff; }
+    .pd-filter-company { display: flex; align-items: center; gap: 9px; }
+    .pd-filter-company label { font-size: 11px; color: var(--pd-muted-2); text-transform: uppercase; letter-spacing: .6px; }
+    .pd-filter-range { display: flex; align-items: center; gap: 9px; }
+    .pd-filter-range label { font-size: 11px; color: var(--pd-muted-2); text-transform: uppercase; letter-spacing: .6px; }
+    .pd-filter-company select {
+      background: var(--pd-surface-2); border: 1px solid var(--pd-border); color: var(--pd-text);
+      font-size: 12.5px; padding: 8px 12px; border-radius: 8px; cursor: pointer; min-width: 200px; outline: none;
+    }
+    .pd-filter-company select:focus { border-color: var(--pd-accent); }
+    .pd-filter-scope { font-size: 12px; color: var(--pd-muted-2); margin-left: auto; }
+    .pd-filter-scope b { color: var(--pd-muted); font-weight: 600; }
+
     /* ===== HEALTH STRIP ===== */
     .pd-health-strip {
       display: flex; align-items: center; gap: 22px; flex-wrap: wrap;
@@ -139,6 +162,15 @@
       padding: 3px 9px; border-radius: 999px; margin-left: auto; font-weight: 500;
     }
     .pd-lead { width: 3px; height: 15px; border-radius: 2px; background: var(--pd-accent); display: inline-block; }
+
+    /* RANGE SELECTOR (histórico, tope 6h) */
+    .pd-range { margin-left: auto; display: inline-flex; gap: 3px; background: var(--pd-surface-2); border: 1px solid var(--pd-border); border-radius: 8px; padding: 3px; }
+    .pd-range-btn {
+      background: transparent; border: none; color: var(--pd-muted); font-size: 11.5px; font-weight: 600;
+      padding: 5px 11px; border-radius: 6px; cursor: pointer; transition: .15s;
+    }
+    .pd-range-btn:hover { color: var(--pd-text); }
+    .pd-range-btn.active { background: var(--pd-accent); color: #fff; }
 
     /* CHART */
     .pd-chart-wrap { position: relative; }
@@ -241,13 +273,11 @@
 
     <div id="pd-banner"></div>
 
-    <section class="pd-health-strip" id="pd-healthStrip"></section>
-
     <section class="pd-kpis" id="pd-kpis"></section>
 
     <div class="pd-grid-2">
       <div class="pd-panel pd-chart-wrap">
-        <h2><span class="pd-lead"></span>Tasa de error / éxito <span class="pd-tag">últimos 180 min</span></h2>
+        <h2><span class="pd-lead"></span>Tasa de error / éxito <span class="pd-tag" id="pd-rangeTag">últimas 6h</span></h2>
         <div id="pd-chart"></div>
         <div class="pd-legend">
           <span class="pd-k"><span class="pd-swatch" style="background:var(--pd-red)"></span>Tasa de error %</span>
@@ -261,6 +291,31 @@
     </div>
 
     <div class="pd-section-title"><span class="pd-lead"></span>Servicios monitoreados <span class="pd-count" id="pd-epCount"></span></div>
+
+    <!-- FILTRO: por API (todo) o por Company (solo las APIs de esa company) -->
+    <div class="pd-filterbar">
+      <div class="pd-filter-modes">
+        <button class="pd-mode active" id="pd-modeApi" onclick="pdSetMode('api')">Todas las APIs</button>
+        <button class="pd-mode" id="pd-modeCompany" onclick="pdSetMode('company')">Por company</button>
+      </div>
+      <div class="pd-filter-company" id="pd-companyPicker" style="display:none">
+        <label for="pd-companySelect">Company</label>
+        <select id="pd-companySelect" onchange="pdApplyFilter()"></select>
+      </div>
+      <div class="pd-filter-range">
+        <label>Histórico</label>
+        <span class="pd-range" id="pd-rangeSel">
+          <button class="pd-range-btn" data-h="1" onclick="pdSetRange(1)">1h</button>
+          <button class="pd-range-btn" data-h="3" onclick="pdSetRange(3)">3h</button>
+          <button class="pd-range-btn active" data-h="6" onclick="pdSetRange(6)">6h</button>
+        </span>
+      </div>
+      <div class="pd-filter-scope" id="pd-scopeLabel"></div>
+    </div>
+
+    <!-- HEX-PANEL: reubicado aquí (antes estaba arriba del todo) -->
+    <section class="pd-health-strip" id="pd-healthStrip"></section>
+
     <section class="pd-endpoints" id="pd-endpoints"></section>
 
     <div class="pd-panel">
@@ -297,6 +352,10 @@
     let pdIsLoading = false;   // evita peticiones solapadas
     let pdTimer = null;        // handle del próximo refresh programado
     let pdFailStreak = 0;      // errores consecutivos (para backoff)
+
+    let pdLastPayload = null;  // último snapshot recibido (para filtrar sin re-pedir)
+    let pdFilterMode = "api";  // "api" = todas | "company" = solo las de una company
+    let pdRangeHours = 6;      // ventana histórica del gráfico (tope 6h)
 
     function pdScClass(code) {
       if (code === 403) return "pd-sc-403";
@@ -388,8 +447,7 @@
       return `<svg class="pd-hexgrid" viewBox="0 0 ${vbW.toFixed(1)} ${vbH.toFixed(1)}" preserveAspectRatio="xMidYMid meet">${cells.join("")}</svg>`;
     }
 
-    function pdRenderHealthStrip(d) {
-      const eps = d.endpoints || [];
+    function pdRenderHealthStrip(eps) {
       const healthy = eps.filter(e => e.status === "healthy").length;
       const warning = eps.filter(e => e.status === "warning").length;
       const critical = eps.filter(e => e.status === "critical").length;
@@ -539,12 +597,63 @@
         return;
       }
       banner.innerHTML = "";
-      pdRenderHealthStrip(d);
+      pdLastPayload = d;                 // guardamos el snapshot para poder filtrar sin re-pedir a AWS
+      pdPopulateCompanies(d.companies);  // refresca el desplegable (conserva selección)
+
+      // Lo que NO depende del filtro se pinta con datos globales.
       pdRenderKpis(d);
       pdRenderChart(d.series || []);
       pdRenderAlarms(d.alarms || []);
-      pdRenderEndpoints(d.endpoints || []);
       pdRenderEventLog(d.event_log || []);
+
+      // Lo que SÍ depende del filtro (hex-panel + lista de servicios).
+      pdApplyFilter();
+    }
+
+    // ---- FILTRO por API (todo) / por Company (solo las APIs de esa company) ----
+    // El filtrado es 100% en el frontend a partir del payload ya recibido: al
+    // cambiar de modo o de company NO se vuelve a llamar a AWS.
+    function pdSetMode(mode) {
+      pdFilterMode = mode;
+      document.getElementById("pd-modeApi").classList.toggle("active", mode === "api");
+      document.getElementById("pd-modeCompany").classList.toggle("active", mode === "company");
+      document.getElementById("pd-companyPicker").style.display = (mode === "company") ? "flex" : "none";
+      pdApplyFilter();
+    }
+
+    function pdPopulateCompanies(companies) {
+      const sel = document.getElementById("pd-companySelect");
+      const list = (companies || []).map(c => c.name);
+      const prev = sel.value;
+      sel.innerHTML = list.map(n => `<option value="${n}">${n}</option>`).join("");
+      // Conserva la company seleccionada si sigue existiendo; si no, la primera.
+      if (list.includes(prev)) sel.value = prev;
+    }
+
+    // Devuelve la lista de servicios a mostrar según el filtro actual.
+    function pdVisibleEndpoints() {
+      const d = pdLastPayload;
+      if (!d) return [];
+      if (pdFilterMode === "company") {
+        const name = document.getElementById("pd-companySelect").value;
+        const company = (d.companies || []).find(c => c.name === name);
+        return company ? company.endpoints : [];
+      }
+      return d.endpoints || [];  // modo "api": todo
+    }
+
+    function pdApplyFilter() {
+      const eps = pdVisibleEndpoints();
+      // Etiqueta de alcance a la derecha de la barra de filtros.
+      const scope = document.getElementById("pd-scopeLabel");
+      if (pdFilterMode === "company") {
+        const name = document.getElementById("pd-companySelect").value || "—";
+        scope.innerHTML = `Mostrando las APIs de <b>${name}</b>`;
+      } else {
+        scope.innerHTML = `Mostrando <b>todas</b> las APIs`;
+      }
+      pdRenderHealthStrip(eps);
+      pdRenderEndpoints(eps);
     }
 
     // Programa el siguiente refresh. Con backoff exponencial si hay errores
@@ -581,7 +690,8 @@
       const to = setTimeout(() => ctrl.abort(), PD_FETCH_TIMEOUT_MS);
 
       try {
-        const res = await fetch(PD_API_URL, { cache: "no-store", signal: ctrl.signal });
+        const url = `${PD_API_URL}?range_hours=${pdRangeHours}`;
+        const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
         const data = await res.json();
         pdRender(data);
         pdFailStreak = 0;  // éxito -> reseteamos backoff
@@ -607,6 +717,20 @@
       if (pdIsLoading) return;
       pdFailStreak = 0;
       pdLoadData();
+    }
+
+    // Cambia la ventana histórica del gráfico (1h / 3h / 6h). Vuelve a pedir al
+    // backend porque la serie y el event log dependen del rango.
+    function pdSetRange(hours) {
+      if (hours === pdRangeHours) return;
+      pdRangeHours = hours;
+      document.querySelectorAll("#pd-rangeSel .pd-range-btn").forEach(b => {
+        b.classList.toggle("active", Number(b.dataset.h) === hours);
+      });
+      const tag = document.getElementById("pd-rangeTag");
+      if (tag) tag.textContent = `últimas ${hours}h`;
+      pdFailStreak = 0;
+      pdLoadData();  // trae la serie/event log del nuevo rango
     }
 
     // Pausa/reanuda según visibilidad de la pestaña. Al volver, refresca ya.
