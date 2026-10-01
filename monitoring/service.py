@@ -63,15 +63,16 @@ from datetime import datetime, timedelta
 # "frescos" sin costo extra. Ajustable según lo que definan con backend.
 CACHE_TTL_SECONDS = 25
 
-# Rangos históricos que ofrece el selector (en horas). TOPE = 6 horas: el jefe
-# no quiere ver más allá de las últimas 6h. 6h es el valor por defecto.
-ALLOWED_RANGE_HOURS = [1, 3, 6]
-DEFAULT_RANGE_HOURS = 6
+# Rangos históricos que ofrece el selector, EN MINUTOS. Permite ventanas cortas
+# (5, 15, 30 min) además de las largas (1h=60, 3h=180, 6h=360). TOPE = 6 horas:
+# el jefe no quiere ver más allá de las últimas 6h. 6h es el valor por defecto.
+ALLOWED_RANGE_MINUTES = [5, 15, 30, 60, 180, 360]
+DEFAULT_RANGE_MINUTES = 360
 
-# La caché es POR RANGO: cada ventana (1h, 3h, 6h) se cachea aparte porque son
-# consultas distintas a AWS. Así cambiar de rango no invalida el de los demás.
+# La caché es POR RANGO: cada ventana (5m, 15m, 1h, 6h...) se cachea aparte
+# porque son consultas distintas a AWS. Cambiar de rango no invalida los demás.
 _cache_lock = threading.Lock()
-_cache = {}  # range_hours -> {"payload": ..., "expires_at": ...}
+_cache = {}  # range_minutes -> {"payload": ..., "expires_at": ...}
 
 
 # --------------------------------------------------------------------------
@@ -146,54 +147,54 @@ def _endpoint_metrics(ep, scale=1.0):
     }
 
 
-def build_monitoring_payload(range_hours=DEFAULT_RANGE_HOURS):
+def build_monitoring_payload(range_minutes=DEFAULT_RANGE_MINUTES):
     """Punto de entrada CON CACHÉ que usa el router.
 
-    range_hours es la ventana histórica pedida (1, 3 o 6). Devuelve el snapshot
-    cacheado de ESE rango si sigue vigente; si expiró, lo regenera una sola vez
-    (protegido por lock para que ráfagas de requests concurrentes no disparen
-    varias consultas a AWS a la vez).
+    range_minutes es la ventana histórica pedida (5, 15, 30, 60, 180 o 360).
+    Devuelve el snapshot cacheado de ESE rango si sigue vigente; si expiró, lo
+    regenera una sola vez (protegido por lock para que ráfagas de requests
+    concurrentes no disparen varias consultas a AWS a la vez).
 
     Al conectar AWS, lo pesado (las llamadas a CloudWatch/Logs) vive dentro de
     _generate_monitoring_payload(); esta capa de caché las amortigua tal cual.
     """
     # Blindaje: si llega algo fuera de lo permitido, caemos al más cercano.
-    if range_hours not in ALLOWED_RANGE_HOURS:
-        range_hours = min(ALLOWED_RANGE_HOURS, key=lambda h: abs(h - range_hours))
+    if range_minutes not in ALLOWED_RANGE_MINUTES:
+        range_minutes = min(ALLOWED_RANGE_MINUTES, key=lambda m: abs(m - range_minutes))
 
     now_ts = time.time()
 
     # Camino rápido: caché vigente para este rango, sin lock (lectura barata).
-    entry = _cache.get(range_hours)
+    entry = _cache.get(range_minutes)
     if entry and now_ts < entry["expires_at"]:
         return entry["payload"]
 
     with _cache_lock:
         # Re-chequeo dentro del lock: otro hilo pudo haber refrescado ya.
         now_ts = time.time()
-        entry = _cache.get(range_hours)
+        entry = _cache.get(range_minutes)
         if entry and now_ts < entry["expires_at"]:
             return entry["payload"]
 
-        payload = _generate_monitoring_payload(range_hours)
-        _cache[range_hours] = {"payload": payload, "expires_at": now_ts + CACHE_TTL_SECONDS}
+        payload = _generate_monitoring_payload(range_minutes)
+        _cache[range_minutes] = {"payload": payload, "expires_at": now_ts + CACHE_TTL_SECONDS}
         return payload
 
 
-def _generate_monitoring_payload(range_hours=DEFAULT_RANGE_HOURS):
+def _generate_monitoring_payload(range_minutes=DEFAULT_RANGE_MINUTES):
     """Genera el snapshot de monitoreo (simulado hasta conectar AWS).
 
-    range_hours acota el histórico: la serie temporal y el event log cubren las
-    últimas 'range_hours' horas.
+    range_minutes acota el histórico: la serie temporal y el event log cubren
+    los últimos 'range_minutes' minutos.
 
     AQUÍ es donde, al migrar, irán las consultas reales a AWS. Todo lo caro
     (CloudWatch / Logs Insights / DynamoDB) va dentro de esta función; la caché
     de build_monitoring_payload() se encarga de no llamarla en cada request.
-    Al conectar AWS, 'range_hours' define el startTime/endTime de las consultas
+    Al conectar AWS, 'range_minutes' define el startTime/endTime de las consultas
     (CloudWatch get_metric_data / Logs Insights start_query).
     """
     now = datetime.utcnow()
-    window_minutes = range_hours * 60
+    window_minutes = range_minutes
 
     # 1) MÉTRICAS GLOBALES POR API (modo "Todas las APIs")
     endpoints = [_endpoint_metrics(ep) for ep in MONITORED_ENDPOINTS]
@@ -215,8 +216,8 @@ def _generate_monitoring_payload(range_hours=DEFAULT_RANGE_HOURS):
     companies.sort(key=lambda c: c["name"])
 
     # 3) EVENT LOG: eventos individuales dentro de la ventana histórica pedida.
-    #    Más eventos si el rango es más amplio.
-    event_count = 8 + range_hours * 2
+    #    Más eventos si el rango es más amplio (escala con los minutos, acotado).
+    event_count = min(40, max(5, 6 + window_minutes // 20))
     event_log = []
     for _ in range(event_count):
         summary, status_code, message = random.choice(ERROR_SAMPLES)
@@ -245,11 +246,15 @@ def _generate_monitoring_payload(range_hours=DEFAULT_RANGE_HOURS):
     #    entre muestras crece con el rango: 1h -> 5min, 6h -> 30min).
     points = 12
     step_minutes = window_minutes / points
+    # En ventanas cortas (<30 min) los puntos caen dentro del mismo minuto, así
+    # que mostramos HH:MM:SS para que las etiquetas no se repitan; en ventanas
+    # largas basta HH:MM.
+    time_fmt = "%H:%M:%S" if window_minutes < 30 else "%H:%M"
     series = []
     for i in range(points):
         t = now - timedelta(minutes=(points - 1 - i) * step_minutes)
         series.append({
-            "time": t.strftime("%H:%M"),
+            "time": t.strftime(time_fmt),
             "error_rate": round(random.uniform(0, 12), 2),
             "success_rate": round(random.uniform(88, 100), 2),
         })
@@ -257,7 +262,7 @@ def _generate_monitoring_payload(range_hours=DEFAULT_RANGE_HOURS):
     return {
         "success": True,
         "generated_at": now.isoformat() + "Z",
-        "range_hours": range_hours,
+        "range_minutes": range_minutes,
         "endpoints": endpoints,
         "companies": companies,
         "event_log": event_log,

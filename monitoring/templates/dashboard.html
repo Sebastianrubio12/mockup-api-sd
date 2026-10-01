@@ -305,9 +305,12 @@
       <div class="pd-filter-range">
         <label>Histórico</label>
         <span class="pd-range" id="pd-rangeSel">
-          <button class="pd-range-btn" data-h="1" onclick="pdSetRange(1)">1h</button>
-          <button class="pd-range-btn" data-h="3" onclick="pdSetRange(3)">3h</button>
-          <button class="pd-range-btn active" data-h="6" onclick="pdSetRange(6)">6h</button>
+          <button class="pd-range-btn" data-m="5" onclick="pdSetRange(5)">5m</button>
+          <button class="pd-range-btn" data-m="15" onclick="pdSetRange(15)">15m</button>
+          <button class="pd-range-btn" data-m="30" onclick="pdSetRange(30)">30m</button>
+          <button class="pd-range-btn" data-m="60" onclick="pdSetRange(60)">1h</button>
+          <button class="pd-range-btn" data-m="180" onclick="pdSetRange(180)">3h</button>
+          <button class="pd-range-btn active" data-m="360" onclick="pdSetRange(360)">6h</button>
         </span>
       </div>
       <div class="pd-filter-scope" id="pd-scopeLabel"></div>
@@ -355,7 +358,7 @@
 
     let pdLastPayload = null;  // último snapshot recibido (para filtrar sin re-pedir)
     let pdFilterMode = "api";  // "api" = todas | "company" = solo las de una company
-    let pdRangeHours = 6;      // ventana histórica del gráfico (tope 6h)
+    let pdRangeMinutes = 360;  // ventana histórica del gráfico, en minutos (tope 360 = 6h)
 
     function pdScClass(code) {
       if (code === 403) return "pd-sc-403";
@@ -690,7 +693,7 @@
       const to = setTimeout(() => ctrl.abort(), PD_FETCH_TIMEOUT_MS);
 
       try {
-        const url = `${PD_API_URL}?range_hours=${pdRangeHours}`;
+        const url = `${PD_API_URL}?range_minutes=${pdRangeMinutes}`;
         const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
         const data = await res.json();
         pdRender(data);
@@ -719,16 +722,21 @@
       pdLoadData();
     }
 
-    // Cambia la ventana histórica del gráfico (1h / 3h / 6h). Vuelve a pedir al
-    // backend porque la serie y el event log dependen del rango.
-    function pdSetRange(hours) {
-      if (hours === pdRangeHours) return;
-      pdRangeHours = hours;
+    // Texto legible del rango: minutos -> "5m" / "30m" / "1h" / "6h".
+    function pdRangeLabel(mins) {
+      return mins < 60 ? `${mins}m` : `${mins / 60}h`;
+    }
+
+    // Cambia la ventana histórica del gráfico (5m / 15m / 30m / 1h / 3h / 6h).
+    // Vuelve a pedir al backend porque la serie y el event log dependen del rango.
+    function pdSetRange(mins) {
+      if (mins === pdRangeMinutes) return;
+      pdRangeMinutes = mins;
       document.querySelectorAll("#pd-rangeSel .pd-range-btn").forEach(b => {
-        b.classList.toggle("active", Number(b.dataset.h) === hours);
+        b.classList.toggle("active", Number(b.dataset.m) === mins);
       });
       const tag = document.getElementById("pd-rangeTag");
-      if (tag) tag.textContent = `últimas ${hours}h`;
+      if (tag) tag.textContent = `últimas ${pdRangeLabel(mins)}`;
       pdFailStreak = 0;
       pdLoadData();  // trae la serie/event log del nuevo rango
     }
